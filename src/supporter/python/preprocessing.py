@@ -6,7 +6,7 @@ from separation_tools import *
 
 def preprocessing(params):
     if params.verbose:
-        print('\n>> Preprocessing Started..')
+        print('>> Preprocessing Started..')
     start_time = time.time()
 
     params.point_cloud = os.path.abspath(params.point_cloud)

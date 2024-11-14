@@ -11,7 +11,7 @@ import glob
 
 from abc import ABC
 from scipy import ndimage
-from torch_geometric.data import Dataset, DataLoader, Data
+from torch_geometric.data import Dataset, Data
 from src.supporter.python.io import ply_io, pcd_io
 
 
@@ -45,13 +45,21 @@ class TestingDataset(Dataset, ABC):
             Data: A PyTorch geometric Data object containing the point cloud.
         """
         point_cloud = np.load(self.filenames[index])  # load the point cloud
-        pos = point_cloud[:, :3].T
+        pos = point_cloud[:, :3]
         pos = torch.from_numpy(pos.copy()).float().to(self.device).requires_grad_(False)
 
         # Center the sample at the origin
-        local_shift = torch.round(torch.mean(pos, axis=0)).requires_grad_(False)
+        local_shift = torch.round(torch.mean(pos[:, :3], axis=0)).requires_grad_(False)
         pos -= local_shift
+
+        # # Ensure consistent size for pos [Remember to remove those padding points later]
+        # if pos.shape[1] < self.points_per_box:
+        #     # Pad the data with zeros
+        #     padding = torch.zeros((3, self.points_per_box - pos.shape[1])).to(self.device)
+        #     pos = torch.cat((pos, padding), dim=1)
+
         return Data(pos=pos, x=None, local_shift=local_shift)  # create Data object
+
     def len(self): pass
     def get(self): pass
 
@@ -155,49 +163,86 @@ def load_file(filename, additional_headers=False, verbose=False):
         return pc
 
 
-def make_dtm(pc, terrain_class):
+def make_dtm(params = None, pc=None, terrain_class = 0):
     """
     Create a digital terrain model (DTM) from the point cloud.
+    :param params: (dict) Dictionary of parameters.
     :param pc: (DataFrame) Point cloud DataFrame containing the terrain data.
     :param terrain_class: (int) Class label for terrain.
     :return:
         DataFrame: Updated point cloud with normalized heights.
     """
-    grid_resolution = 0.5  # Resolution for voxelization
-    pc = voxelise(pc, grid_resolution, z=False)  # Voxelize the point cloud
+    if params is None and pc is not None:
+        grid_resolution = 0.5  # Resolution for voxelization
+        pc = voxelise(pc, grid_resolution, z=False)  # Voxelize the point cloud
 
-    # Identify ground points based on the terrain class
-    ground = pc.loc[pc.label == terrain_class]
-    ground['zmin'] = ground.groupby('VX').z.transform(np.median)  # get median height
-    ground = ground[ground.z == ground.zmin].drop_duplicates('VX')  # keep lowest points
+        # Identify ground points based on the terrain class
+        ground = pc.loc[pc.label == terrain_class]
+        ground.loc[:, 'zmin'] = ground.groupby('VX').z.transform(np.median)  # get median height
+        ground = ground[ground.z == ground.zmin].drop_duplicates('VX')  # keep lowest points
 
-    # Create a mesh grid for the ground
-    X, Y = np.meshgrid(
-        np.arange(pc.xx.min(), pc.xx.max() + grid_resolution, grid_resolution),
-        np.arange(pc.yy.min(), pc.yy.max() + grid_resolution, grid_resolution))
+        # Create a mesh grid for the ground
+        X, Y = np.meshgrid(
+            np.arange(pc.xx.min(), pc.xx.max() + grid_resolution, grid_resolution),
+            np.arange(pc.yy.min(), pc.yy.max() + grid_resolution, grid_resolution))
 
-    ground_arr = pd.DataFrame(data=np.vstack([X.flatten(), Y.flatten()]).T, columns=['xx', 'yy'])
-    VX_map = pc.loc[~pc.VX.duplicated()][['xx', 'yy', 'VX']]
-    ground_arr = ground_arr.merge(VX_map, on=['xx', 'yy'], how='outer')  # map VX to ground_arr
-    ground_arr = ground_arr.merge(ground[['z', 'VX']], on=['VX'], how='right')  # map z to ground_arr
-    ground_arr.sort_values(['xx', 'yy'], inplace=True)
+        ground_arr = pd.DataFrame(data=np.vstack([X.flatten(), Y.flatten()]).T, columns=['xx', 'yy'])
+        VX_map = pc.loc[~pc.VX.duplicated()][['xx', 'yy', 'VX']]
+        ground_arr = ground_arr.merge(VX_map, on=['xx', 'yy'], how='outer')  # map VX to ground_arr
+        ground_arr = ground_arr.merge(ground[['z', 'VX']], how='left', on=['VX'])  # map z to ground_arr
+        ground_arr.sort_values(['xx', 'yy'], inplace=True)
 
-    # Fill NaN Values in ground_arr using a median filter
-    ground_arr['ZZ'] = np.nan
-    size = 3
-    while np.any(np.isnan(ground_arr.ZZ)):
-        ground_arr['ZZ'] = ndimage.generic_filter(
-            ground_arr.z.values.reshape(*X.shape),
-            lambda z: np.nanmedian(z),
-            size=size
-        ).flatten()
-        size += 2  # increase the filter size
+        # Fill NaN Values in ground_arr using a median filter
+        ground_arr['ZZ'] = np.nan
+        size = 3
+        while np.any(np.isnan(ground_arr.ZZ)):
+            ground_arr['ZZ'] = ndimage.generic_filter(
+                ground_arr.z.values.reshape(*X.shape), lambda z: np.nanmedian(z), size=size
+            ).flatten()
+            size += 2  # increase the filter size
 
-    # Update point cloud with normalized heights
-    MAP = ground_arr.set_index('VX').ZZ.to_dict()
-    pc['n_z'] = pc.z - pc.VX.map(MAP)
+        # Update point cloud with normalized heights
+        MAP = ground_arr.set_index('VX').ZZ.to_dict()
+        pc['n_z'] = pc.z - pc.VX.map(MAP)
 
-    return pc
+        return pc
+
+    elif params is not None and pc is None:
+        params.grid_resolution = 0.5
+        params.pc = voxelise(params.pc, params.grid_resolution, z=False)
+
+        # Identify ground points based on the terrain class
+        ground = params.pc.loc[params.pc.label == params.terrain_class]
+        ground.loc[:, 'zmin'] = ground.groupby('VX').z.transform(np.median)  # get median height
+        ground = ground[ground.z == ground.zmin].drop_duplicates('VX')  # keep lowest points
+
+        # Create a mesh grid for the ground
+        X, Y = np.meshgrid(
+            np.arange(params.pc.xx.min(), params.pc.xx.max() + params.grid_resolution, params.grid_resolution),
+            np.arange(params.pc.yy.min(), params.pc.yy.max() + params.grid_resolution, params.grid_resolution))
+
+        ground_arr = pd.DataFrame(data=np.vstack([X.flatten(), Y.flatten()]).T, columns=['xx', 'yy'])
+        VX_map = params.pc.loc[~params.pc.VX.duplicated()][['xx', 'yy', 'VX']]
+        ground_arr = ground_arr.merge(VX_map, on=['xx', 'yy'], how='outer')  # map VX to ground_arr
+        ground_arr = ground_arr.merge(ground[['z', 'VX']], how='left', on=['VX'])  # map z to ground_arr
+        ground_arr.sort_values(['xx', 'yy'], inplace=True)
+
+        # Fill NaN Values in ground_arr using a median filter
+        ground_arr['ZZ'] = np.nan
+        size = 3
+        while np.any(np.isnan(ground_arr.ZZ)):
+            ground_arr['ZZ'] = ndimage.generic_filter(
+                ground_arr.z.values.reshape(*X.shape), lambda z: np.nanmedian(z), size=size
+            ).flatten()
+            size += 2  # increase the filter size
+
+        # Update point cloud with normalized heights
+        MAP = ground_arr.set_index('VX').ZZ.to_dict()
+        params.pc['n_z'] = params.pc.z - params.pc.VX.map(MAP)
+
+        return params
+    else:
+        raise Exception("! Either params or pc shall be input.")
 
 
 def make_folder_structure(params):
@@ -221,14 +266,14 @@ def make_folder_structure(params):
     return params
 
 
-def save_file(filename, pointcloud, additional_fields=[], verbose=False):
+def save_file(filename, pointcloud, additional_fields=None, verbose=False):
     #     if pointcloud.shape[0] == 0:
     #         print(filename, 'is empty...')
     #     else:
     if verbose:
         print('Saving file:', filename)
 
-    cols = ['x', 'y', 'z'] + additional_fields
+    cols = ['x', 'y', 'z'] if additional_fields is None else ['x', 'y', 'z'] + additional_fields
 
     if filename.endswith('.las'):
         las = laspy.create(file_version="1.4", point_format=7)
@@ -240,15 +285,16 @@ def save_file(filename, pointcloud, additional_fields=[], verbose=False):
         las.z = pointcloud['z']
 
         if len(additional_fields) != 0:
-            additional_fields = additional_fields[3:]
+            # additional_fields = additional_fields[3:]
 
             #  The reverse step below just puts the headings in the preferred order. They are backwards without it.
-            col_idxs = list(range(3, pointcloud.shape[1]))
+            # col_idxs = list(range(3, pointcloud.shape[1]))
+            col_idxs = [pointcloud.columns.get_loc(c) for c in additional_fields]
             additional_fields.reverse()
-
             col_idxs.reverse()
+
             for header, i in zip(additional_fields, col_idxs):
-                column = pointcloud[:, i]
+                column = pointcloud.iloc[:, i]
                 if header in ['red', 'green', 'blue']:
                     setattr(las, header, column)
                 else:
@@ -263,11 +309,9 @@ def save_file(filename, pointcloud, additional_fields=[], verbose=False):
         print("Saved to:", filename)
 
     elif filename.endswith('.ply'):
-
         if not isinstance(pointcloud, pd.DataFrame):
             cols = list(set(cols))
             pointcloud = pd.DataFrame(pointcloud, columns=cols)
-
         ply_io.write_ply(filename, pointcloud[cols])
         print("Saved to:", filename)
 

@@ -6,7 +6,10 @@ from torch_geometric.nn import PointNetConv, fps, radius, global_max_pool
 
 
 def MLP(channels, batch_norm=True):
-    return Seq(*[Seq(Lin(channels[i - 1], channels[i]), ReLU(), BN(channels[i])) for i in range(1, len(channels))])
+    return Seq(*[
+        Seq(Lin(channels[i - 1], channels[i]), ReLU(), BN(channels[i]))
+        for i in range(1, len(channels))
+    ])
 
 
 class FPModule(torch.nn.Module):
