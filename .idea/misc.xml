@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="TLS2trees" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="TLS2trees" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="mangrove_tls" project-jdk-type="Python SDK" />
 </project>

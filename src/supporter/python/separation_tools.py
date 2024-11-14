@@ -3,6 +3,7 @@ import itertools
 import laspy
 import numpy as np
 import pandas as pd
+import shutil
 import torch
 import os
 import threading
@@ -11,7 +12,7 @@ import glob
 from abc import ABC
 from scipy import ndimage
 from torch_geometric.data import Dataset, DataLoader, Data
-from io import ply_io, pcd_io
+from src.supporter.python.io import ply_io, pcd_io
 
 
 class DictToClass:
@@ -199,6 +200,27 @@ def make_dtm(pc, terrain_class):
     return pc
 
 
+def make_folder_structure(params):
+    if params.out_dir is None:
+        params.out_dir = os.path.join(params.directory, params.filename + '_FSCT_output')
+    params.working_dir = os.path.join(params.out_dir, params.basename + '.tmp')
+
+    if not os.path.isdir(params.out_dir):
+        os.makedirs(params.out_dir)
+
+    if not os.path.isdir(params.working_dir):
+        os.makedirs(params.working_dir)
+    else:
+        shutil.rmtree(params.working_dir, ignore_errors=True)
+        os.makedirs(params.working_dir)
+
+    if params.verbose:
+        print('-- Output directory:', params.out_dir)
+        print('-- Scratch directory:', params.working_dir)
+
+    return params
+
+
 def save_file(filename, pointcloud, additional_fields=[], verbose=False):
     #     if pointcloud.shape[0] == 0:
     #         print(filename, 'is empty...')
@@ -250,9 +272,11 @@ def save_file(filename, pointcloud, additional_fields=[], verbose=False):
         print("Saved to:", filename)
 
 
-def save_pts(pc, box_dims, min_points_per_box, max_points_per_box, I, bx, by, bz, working_dir='./'):
+def save_pts(pc=None, box_dims=None, min_points_per_box=None, max_points_per_box=None,
+             I=None, bx=None, by=None, bz=None, working_dir='./', params=None):
     """
     Save points in bounding boxes to files.
+    :param params: (Dict) A dictionary of input parameters.
     :param pc: (DataFrame) Point cloud DataFrame.
     :param box_dims: (array) Dimensions of the box.
     :param min_points_per_box: (int) Minimum number of points to save.
@@ -263,13 +287,24 @@ def save_pts(pc, box_dims, min_points_per_box, max_points_per_box, I, bx, by, bz
     :param bz: (float) Base Z coordinate for the box.
     :param working_dir: (str) Directory to save the output files.
     """
-    pc = pc.loc[(pc.x.between(bx, bx + box_dims[0])) &
-                (pc.y.between(by, by + box_dims[0])) &
-                (pc.z.between(bz, bz + box_dims[0]))]
-    if len(pc) > min_points_per_box:
-        if len(pc) > max_points_per_box:
-            pc = pc.sample(n=max_points_per_box)  # randomly sample points if too many
-        np.save(os.path.join(working_dir, f'{I:07}'), pc[['x', 'y', 'z']].values)
+    if params is None and pc is not None:
+        pc = pc.loc[(pc.x.between(bx, bx + box_dims[0])) &
+                    (pc.y.between(by, by + box_dims[0])) &
+                    (pc.z.between(bz, bz + box_dims[0]))]
+        if len(pc) > min_points_per_box:
+            if len(pc) > max_points_per_box:
+                pc = pc.sample(n=max_points_per_box)  # randomly sample points if too many
+            np.save(os.path.join(working_dir, f'{I:07}'), pc[['x', 'y', 'z']].values)
+    elif params is not None and pc is None:
+        pc = params.pc.loc[(params.pc.x.between(bx, bx + box_dims[0])) &
+                           (params.pc.y.between(by, by + box_dims[0])) &
+                           (params.pc.z.between(bz, bz + box_dims[0]))]
+        if len(pc) > params.min_points_per_box:
+            if len(pc) > params.max_points_per_box:
+                pc = pc.sample(n=params.max_points_per_box)
+            np.save(os.path.join(params.working_dir, f'{I:07}'), pc[['x', 'y', 'z']].values)
+    else:
+        raise Exception("! Either params or pc shall be input.")
 
 
 def voxelise(tmp, length, method='random', z=True):
