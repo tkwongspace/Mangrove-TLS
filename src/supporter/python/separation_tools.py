@@ -3,17 +3,22 @@ import itertools
 import laspy
 import numpy as np
 import pandas as pd
+import networkx as nx
 import shutil
 import torch
 import os
-import threading
 import glob
-
+import warnings
 from abc import ABC
-from scipy import ndimage
-from torch_geometric.data import Dataset, Data
-from src.supporter.python.io import ply_io, pcd_io
 
+from sklearn.neighbors import NearestNeighbors
+from scipy import ndimage
+from scipy.spatial import ConvexHull
+from sklearn.cluster import DBSCAN
+from torch_geometric.data import Dataset, Data
+from tqdm.auto import tqdm
+from src.supporter.python.io import ply_io, pcd_io
+from src.supporter.python.fit_cylinders import RANSAC_helper
 
 class DictToClass:
     """
@@ -89,6 +94,18 @@ def compute_plot_centre(pc):
     return (plot_min + ((plot_max - plot_min) / 2)).values
 
 
+def cube(pc):
+    """Return a random sample of points forming the convex hull."""
+    try:
+        if len(pc) > 5:
+            vertices = ConvexHull(pc[['x', 'y', 'z']]).vertices
+            idx = np.random.choice(vertices, size=len(vertices), replace=False)
+            return pc.loc[pc.index[idx]]
+    except Exception as e:
+        print(f"Error in cube function: {e}")
+    return pc
+
+
 def downsample(pc, v_length, accurate=False, keep_columns=None, keep_points=False, voxel_method='random',
                return_vx=False, verbose=False):
     """
@@ -129,6 +146,99 @@ def downsample(pc, v_length, accurate=False, keep_columns=None, keep_points=Fals
         return pc[columns + ['downsample']]
     else:
         return pc.loc[pc.downsample][columns]
+
+
+def find_stems(skl, slices, params=None, find_stems_min_radius=0.025, find_stems_min_points=200,
+               pandarallel=False, verbose=True):
+    # Initial settings
+    if params is not None:
+        verbose = params.verbose
+        find_stems_min_radius = params.find_stems_min_radius
+        find_stems_min_points = params.find_stems_min_points
+        pandarallel = params.pandarallel
+
+    # Remove noise from dbh slice
+    nn = NearestNeighbors(n_neighbors=10).fit(slices[['x', 'y', 'z']])
+    distances, indices = nn.kneighbors()
+    slices.loc[:, 'nn'] = distances[:, 1:].mean(axis=1)
+    slices = slices.loc[slices.nn < slices.nn.quantile(q=0.9)]
+
+    # DBSCAN to find potential stems
+    dbscan = DBSCAN(eps=0.2, min_samples=50).fit(slices[['x', 'y']])
+    slices['clstr_db'] = dbscan.labels_
+    slices = slices.loc[slices.clstr_db > -1]
+    slices.loc[:, 'cclstr'] = slices.groupby('clstr_db').clstr.transform('min')
+
+    if len(slices) > 10:
+        # RANSAC cylinder fitting
+        if verbose:
+            print('>> Fitting cylinders to possible stems...')
+
+        if pandarallel:
+            fitted_cyl = slices.groupby('cclstr').parallel_apply(RANSAC_helper, 100).to_dict()
+        else:
+            fitted_cyl = slices.groupby('cclstr').apply(RANSAC_helper, 100).to_dict()
+
+        # extract coordinates of cylinder center to table
+        fitted_cyl = pd.DataFrame(fitted_cyl).T
+        fitted_cyl.columns = ['radius', 'centre', 'CV', 'cnt']
+        fitted_cyl.loc[:, ['x', 'y', 'z']] = pd.DataFrame(fitted_cyl.centre.tolist(), index=fitted_cyl.index)
+        fitted_cyl = fitted_cyl.drop(columns=['centre']).astype(float)
+
+        # Identify nodes based on cylinder properties
+        skl.loc[skl.clstr.isin(fitted_cyl.loc[
+             (fitted_cyl.radius > find_stems_min_radius) &
+             (fitted_cyl.cnt > find_stems_min_points) &
+             (fitted_cyl.CV <= 0.15)
+         ].index.values), 'dbh_node'] = True
+
+    else:
+        warnings.warn(f'No cylinder found with radius {find_stems_min_radius}. Set cylinders to None.')
+        fitted_cyl = None
+
+    return skl, fitted_cyl
+
+
+def generate_path(samples, origins, n_neighbours=200, max_length=0, params=None):
+    """Generate paths through the point cloud based on nearest neighbors."""
+    nn = NearestNeighbors(n_neighbors=n_neighbours).fit(samples[['x', 'y', 'z']])
+    distances, indices = nn.kneighbors()
+
+    from_to_all = pd.DataFrame(np.vstack([
+        np.repeat(samples.clstr.values, n_neighbours),
+        samples.iloc[indices.ravel()].clstr.values,
+        distances.ravel()
+    ]).T, columns=['source', 'target', 'length'])
+
+    # Remove X-X connections and keep edges with minimum distance
+    from_to_all = from_to_all[from_to_all.target != from_to_all.source]
+    edges = from_to_all.groupby(['source', 'target']).length.min().reset_index()
+    edges = edges[edges.length <= max_length]
+
+    # Filter origins based on edges
+    origins = [s for s in origins if s in edges.source.values]
+
+    # Create graph and compute the shortest paths
+    G = nx.from_pandas_edgelist(edges, edge_attr=['length'])
+    distance, shortest_path = nx.multi_source_dijkstra(G, sources=origins, weight='length')
+
+    # Prepare paths DataFrame
+    paths = pd.DataFrame(distance.items(), columns=['clstr', 'distance'])
+    paths['base'] = -1 if params is None else params.not_base
+    for p in paths.index:
+        paths.at[p, 'base'] = shortest_path[p][0]
+    paths.columns = ['clstr', 'distance', 't_clstr']
+
+    # Identify branch tips
+    node_occurance = {}
+    for path in shortest_path.values():
+        for node in path:
+            node_occurance[node] = node_occurance.get(node, 0) + 1
+
+    tips = [k for k, v in node_occurance.items() if v == 1]
+    paths['is_tip'] = paths.clstr.isin(tips)
+
+    return paths
 
 
 def load_file(filename, additional_headers=False, verbose=False):
@@ -316,19 +426,20 @@ def save_file(filename, pointcloud, additional_fields=None, verbose=False):
         print("Saved to:", filename)
 
 
-def save_pts(pc=None, box_dims=None, min_points_per_box=None, max_points_per_box=None,
-             I=None, bx=None, by=None, bz=None, working_dir='./', params=None):
+def save_pts(params=None, pc=None, I=None, bx=None, by=None, bz=None,
+             box_dims=None, min_points_per_box=None, max_points_per_box=None,
+             working_dir='./'):
     """
     Save points in bounding boxes to files.
     :param params: (Dict) A dictionary of input parameters.
     :param pc: (DataFrame) Point cloud DataFrame.
-    :param box_dims: (array) Dimensions of the box.
-    :param min_points_per_box: (int) Minimum number of points to save.
-    :param max_points_per_box: (int) Maximum number of points to save.
     :param I: (int) Index for naming the output file.
     :param bx: (float) Base X coordinate for the box.
     :param by: (float) Base Y coordinate for the box.
     :param bz: (float) Base Z coordinate for the box.
+    :param box_dims: (array) Dimensions of the box.
+    :param min_points_per_box: (int) Minimum number of points to save.
+    :param max_points_per_box: (int) Maximum number of points to save.
     :param working_dir: (str) Directory to save the output files.
     """
     if params is None and pc is not None:
@@ -349,6 +460,21 @@ def save_pts(pc=None, box_dims=None, min_points_per_box=None, max_points_per_box
             np.save(os.path.join(params.working_dir, f'{I:07}'), pc[['x', 'y', 'z']].values)
     else:
         raise Exception("! Either params or pc shall be input.")
+
+
+def slice_cluster(pc, label_offset, verbose=True):
+    for slice_height in tqdm(np.sort(pc.n_slice.unique()),
+                             disable=verbose,
+                             desc='Slice data vertically and clustering'):
+        new_slice = pc.loc[pc.n_slice == slice_height]
+        if len(new_slice) > 200:
+            dbscan = DBSCAN(eps=0.1, min_samples=20).fit(new_slice[['x', 'y', 'z']])
+            new_slice.loc[:, 'clstr'] = dbscan.labels_
+            new_slice.loc[new_slice.clstr > -1, 'clstr'] += label_offset
+            pc.loc[new_slice.index, 'clstr'] = new_slice.clstr
+            label_offset = pc.clstr.max() + 1
+
+    return pc
 
 
 def voxelise(tmp, length, method='random', z=True):

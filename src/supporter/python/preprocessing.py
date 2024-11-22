@@ -55,7 +55,7 @@ def preprocessing(params):
     # multithread segmenting points into boxes and update params
     threads = []
     for i, (bx, by, bz) in enumerate(itertools.product(x_cnr, y_cnr, z_cnr)):
-        threads.append(threading.Thread(target=save_pts, args=(params, i, bx, by, bz)))
+        threads.append(threading.Thread(target=save_pts, args=(params, None, i, bx, by, bz)))
 
     for x in tqdm(threads,
                   desc='generating data blocks',
@@ -129,10 +129,11 @@ if __name__ == '__main__':
 
     # multithread segmenting points into boxes and save
     threads = []
+    params = None
     for i, (bx, by, bz) in enumerate(itertools.product(x_cnr, y_cnr, z_cnr)):
         threads.append(threading.Thread(target=save_pts,
-                                        args=(pc, box_dims, min_points_per_box, max_points_per_box,
-                                              i, bx, by, bz, out_path)))
+                                        args=(params, pc, i, bx, by, bz,
+                                              box_dims, min_points_per_box, max_points_per_box, out_path)))
     for x in tqdm(threads, desc='generating data blocks', disable=False):
         x.start()  # start each thread
     for x in threads:

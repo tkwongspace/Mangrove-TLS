@@ -1,3 +1,5 @@
+# The first step of TLS separation.
+
 import os
 import argparse
 import pickle
