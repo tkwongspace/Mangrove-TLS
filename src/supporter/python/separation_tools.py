@@ -161,23 +161,26 @@ def find_stems(skl, slices, params=None, find_stems_min_radius=0.025, find_stems
     nn = NearestNeighbors(n_neighbors=10).fit(slices[['x', 'y', 'z']])
     distances, indices = nn.kneighbors()
     slices.loc[:, 'nn'] = distances[:, 1:].mean(axis=1)
-    slices = slices.loc[slices.nn < slices.nn.quantile(q=0.9)]
+    slices = slices.loc[slices.nn < slices.nn.quantile(q=0.9)].copy()
 
     # DBSCAN to find potential stems
     dbscan = DBSCAN(eps=0.2, min_samples=50).fit(slices[['x', 'y']])
     slices['clstr_db'] = dbscan.labels_
-    slices = slices.loc[slices.clstr_db > -1]
+    slices = slices.loc[slices.clstr_db > -1].copy()
     slices.loc[:, 'cclstr'] = slices.groupby('clstr_db').clstr.transform('min')
 
     if len(slices) > 10:
         # RANSAC cylinder fitting
-        if verbose:
-            print('>> Fitting cylinders to possible stems...')
-
         if pandarallel:
+            if verbose:
+                print('>> Fitting cylinders to possible stems...')
             fitted_cyl = slices.groupby('cclstr').parallel_apply(RANSAC_helper, 100).to_dict()
         else:
-            fitted_cyl = slices.groupby('cclstr').apply(RANSAC_helper, 100).to_dict()
+            group_xyz = slices.groupby('cclstr')
+            fitted_cyl = {}
+            for name, xyz in tqdm(group_xyz, desc="Fitting cylinders to possible stems", disable=not verbose):
+                result = RANSAC_helper(xyz, 100)
+                fitted_cyl[name] = result
 
         # extract coordinates of cylinder center to table
         fitted_cyl = pd.DataFrame(fitted_cyl).T

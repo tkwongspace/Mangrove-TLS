@@ -8,7 +8,7 @@ def identify_stems(params, clusters, stem, bounding_box):
     find_stems_min = int(params.find_stems_height // params.slice_thickness)
     find_stems_max = int((params.find_stems_height + params.find_stems_thickness) // params.slice_thickness) + 1
     dbh_nodes_plus = skeleton.loc[skeleton.n_slice.between(find_stems_min, find_stems_max)].clstr
-    dbh_slice = stem.loc[stem.clstr.isin(dbh_nodes_plus)]
+    dbh_slice = stem.loc[stem.clstr.isin(dbh_nodes_plus)].copy()
 
     if len(dbh_slice) > 0:
         skeleton, dbh_cylinder = find_stems(skl=skeleton, slices=dbh_slice, params=params)

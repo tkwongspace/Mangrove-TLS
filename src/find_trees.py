@@ -168,9 +168,9 @@ def main():
         if params.save_diameter_class:
             d_dir = f'{(dbh_cylinder.loc[b].radius * 2 // 0.1) / 10:.1f}'
             os.makedirs(os.path.join(params.odir, d_dir), exist_ok=True)
-            save_path = os.path.join(params.odir, d_dir, f'{params.n:03}_T{I}.leafoff.las')
+            save_path = os.path.join(params.odir, d_dir, f'T{I}_leafoff.las')
         else:
-            save_path = os.path.join(params.odir, f'{params.n:03}_T{I}.leafoff.las')
+            save_path = os.path.join(params.odir, f'T{I}_leafoff.las')
         save_file(filename=save_path, pointcloud=trees[trees.t_clstr == b])
         params.base_I[b] = I
         I += 1
@@ -260,14 +260,14 @@ def main():
         leaf_paths.loc[:, 'VX'] = leaf_paths['clstr'].map(index_to_VX)
 
         # Same colour for leaves as stem
-        lvs = pd.merge(lvs, leaf_paths[['VX', 't_clstr', 'distance']], on='VX', how='leaf')
+        lvs = pd.merge(lvs, leaf_paths[['VX', 't_clstr', 'distance']], on='VX', how='left')
 
         # Save leaf voxel data to output
         for leaf in tqdm(in_tile_stem_nodes):
             I = params.base_I[leaf]
             wood_fn = glob.glob(os.path.join(params.odir,
                                              '*' if params.save_diameter_class else '',
-                                             f'{params.n:03}_T{I}.leafoff.las'))[0]
+                                             f'T{I}_leafoff.las'))[0]
             stem = load_file(os.path.join(wood_fn))
             stem.loc[:, 'wood'] = 1
 

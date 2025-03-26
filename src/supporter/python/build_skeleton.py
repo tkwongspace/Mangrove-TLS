@@ -22,7 +22,7 @@ def build_skeleton(params):
     if params.pandarallel:
         cvx_hull = clusters.parallel_apply(cube).reset_index(drop=True)
     else:
-        cvx_hull = clusters.apply(cube).reset_index(drop=True)
+        cvx_hull = clusters.apply(cube, include_groups=False).reset_index()
 
     return stem_pc, cvx_hull, clusters
 
